@@ -40,14 +40,15 @@ class PredictResponse(BaseModel):
 
 def _load_model_and_scaler(model_path: str = "rockfall_model.pkl", scaler_path: str = "scaler.pkl"):
     try:
+        logger.info("Attempting to load model from absolute path: %s", os.path.abspath(model_path))
         model = joblib.load(model_path)
         scaler = joblib.load(scaler_path)
         return model, scaler
     except FileNotFoundError as e:
-        logger.warning("Model or scaler file not found: %s", e)
+        logger.error("Model or scaler file not found: %s", e)
         return None, None
     except Exception:
-        logger.warning("Failed to load model/scaler", exc_info=True)
+        logger.error("Failed to load model/scaler", exc_info=True)
         return None, None
 
 
@@ -117,14 +118,56 @@ app.add_middleware(
 
 
 @app.post("/predict", response_model=PredictResponse)
-def predict(req: PredictRequest):
+async def predict(req: PredictRequest):
     location = req.location
+    logger.info(f"Received prediction request for location: {location}")
 
-    # 1. Extract DEM features
-    dem_path = _get_dem_path_from_env()
-    features_df = extract_dem_features(dem_path)
-    if features_df.empty:
-        raise HTTPException(status_code=500, detail="Failed to extract DEM features")
+    try:
+        # 1. Extract features using dummy data
+        features_df = extract_dem_features(location)
+        if features_df.empty:
+            logger.error("Failed to generate features")
+            raise HTTPException(status_code=500, detail="Failed to generate features")
+
+        # 2. Load model and make prediction
+        model, scaler = _load_model_and_scaler()
+        if model is None or scaler is None:
+            logger.error("Failed to load model or scaler")
+            raise HTTPException(status_code=500, detail="Model unavailable")
+
+        # 3. Make prediction
+        risk_level, probability = _predict_risk(features_df, model, scaler)
+        logger.info(f"Prediction: {risk_level} with probability {probability:.2f}")
+
+        # 4. Send alerts if high risk
+        alert_sent = False
+        if risk_level == "High":
+            try:
+                email_ok = send_email_alert(location, risk_level, probability)
+                sms_ok = send_sms_alert(location, risk_level, probability)
+                alert_sent = bool(email_ok or sms_ok)
+            except Exception as e:
+                logger.error(f"Failed to send alerts: {e}")
+                # Continue even if alerts fail
+
+        # 5. Get coordinates (either from features or defaults)
+        lat = features_df['latitude'].iloc[0] if 'latitude' in features_df.columns else 25.0
+        lon = features_df['longitude'].iloc[0] if 'longitude' in features_df.columns else 85.0
+
+        return PredictResponse(
+            location=location,
+            risk_level=risk_level,
+            probability=float(probability),
+            alert_sent=alert_sent,
+            latitude=lat,
+            longitude=lon
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Unexpected error during prediction")
+        raise HTTPException(status_code=500, detail=str(e))
 
     # 2. Load model and scaler, then predict; if unavailable, fall back to DEM-derived label
     model, scaler = _load_model_and_scaler()
@@ -170,6 +213,6 @@ def predict(req: PredictRequest):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("app:app", host="0.0.0.0", port=8000, reload=False)
+    uvicorn.run("app:app", host="0.0.0.0", port=8000, reload=True)
 
 

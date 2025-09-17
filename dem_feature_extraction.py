@@ -1,86 +1,79 @@
-import rasterio
 import numpy as np
 import pandas as pd
-from sklearn.preprocessing import StandardScaler
+import logging
 
-def extract_dem_features(dem_path):
-    """
-    Extracts numerical features from a DEM raster and stores them in a Pandas DataFrame.
+logger = logging.getLogger(__name__)
+
+
+def extract_dem_features(location_str: str) -> pd.DataFrame:
+    """Generate deterministic dummy features for a given location string.
+
+    This function intentionally avoids heavy GIS dependencies so the API
+    remains testable even when real DEM processing is not available.
+
+    The returned DataFrame contains the exact columns that `app._predict_risk`
+    expects:
+      - mean_elevation, max_elevation, min_elevation, elevation_range,
+        slope_mean, aspect_mean, roughness, rainfall, temperature, vibration
+    Additionally it may include:
+      - rockfall_risk (0=Stable,1=Moderate,2=High) used as a fallback label
+      - latitude, longitude (floats)
 
     Args:
-        dem_path (str): Path to the DEM GeoTIFF file.
+        location_str: arbitrary location identifier (used to seed RNG deterministically)
 
     Returns:
-        pandas.DataFrame: DataFrame containing the extracted features.
+        pd.DataFrame with one row of features, or empty DataFrame on fatal error.
     """
     try:
-        with rasterio.open(dem_path) as src:
-            dem_array = src.read(1)
+        # Use a hash of the location string to produce deterministic but varied results
+        seed = abs(hash(location_str)) % (2 ** 32)
+        rng = np.random.default_rng(seed)
 
-            # Calculate features
-            mean_elevation = np.mean(dem_array)
-            max_elevation = np.max(dem_array)
-            min_elevation = np.min(dem_array)
-            elevation_range = max_elevation - min_elevation
-            roughness = np.std(dem_array)
+        mean_elevation = float(rng.uniform(100, 1000))
+        elevation_range = float(rng.uniform(50, 200))
+        max_elevation = mean_elevation + elevation_range / 2.0
+        min_elevation = mean_elevation - elevation_range / 2.0
+        roughness = float(rng.uniform(0.1, 5.0))
 
-            # Calculate slope and aspect using numpy gradient
-            gradient_x, gradient_y = np.gradient(dem_array)
-            slope = np.arctan(np.sqrt(gradient_x**2 + gradient_y**2))
-            aspect = np.arctan2(gradient_y, gradient_x)
+        slope_mean = float(rng.uniform(0, 45))
+        aspect_mean = float(rng.uniform(0, 360))
 
-            # Convert slope and aspect to degrees
-            slope_degrees = np.degrees(slope)
-            aspect_degrees = np.degrees(aspect)
+        rainfall = float(rng.uniform(0, 100))
+        temperature = float(rng.uniform(10, 40))
+        vibration = float(rng.uniform(0, 5))
 
-            # Handle edge cases for aspect (optional)
-            aspect_degrees = (aspect_degrees + 360) % 360  # Ensure values between 0 and 360
+        data = {
+            'mean_elevation': [mean_elevation],
+            'max_elevation': [max_elevation],
+            'min_elevation': [min_elevation],
+            'elevation_range': [elevation_range],
+            'slope_mean': [slope_mean],
+            'aspect_mean': [aspect_mean],
+            'roughness': [roughness],
+            'rainfall': [rainfall],
+            'temperature': [temperature],
+            'vibration': [vibration],
+        }
 
-            # Add synthetic environmental features
-            rainfall = np.random.rand() * 100  # Example rainfall value
-            temperature = np.random.rand() * 30 + 10  # Example temperature value (10-40)
-            vibration = np.random.rand() * 5  # Example vibration value
+        df = pd.DataFrame(data)
 
-            # Create DataFrame
-            data = {
-                'mean_elevation': [mean_elevation],
-                'max_elevation': [max_elevation],
-                'min_elevation': [min_elevation],
-                'elevation_range': [elevation_range],
-                'slope_mean': [np.mean(slope_degrees)],
-                'aspect_mean': [np.mean(aspect_degrees)],
-                'roughness': [roughness],
-                'rainfall': [rainfall],
-                'temperature': [temperature],
-                'vibration': [vibration]
-            }
-            df = pd.DataFrame(data)
+        # Simple deterministic heuristic label for fallback when model is absent
+        if slope_mean > 35 and roughness > 2.5 and rainfall > 70 and vibration > 3:
+            df['rockfall_risk'] = 2
+        elif slope_mean > 20 and roughness > 1.5:
+            df['rockfall_risk'] = 1
+        else:
+            df['rockfall_risk'] = 0
 
-            # Add rockfall_risk label based on a more deterministic (but still synthetic) logic
-            # This is a simplified example to demonstrate how features could influence risk
-            risk_level = 0 # Stable
+        # Synthetic coordinates derived from seed so location->coords consistent
+        lat = 25.0 + (seed % 1000) / 1000.0 - 0.5
+        lon = 85.0 + ((seed // 1000) % 1000) / 1000.0 - 0.5
+        df['latitude'] = float(lat)
+        df['longitude'] = float(lon)
 
-            if np.mean(slope_degrees) > 20 and roughness > 15:
-                risk_level = 1 # Moderate
-            if np.mean(slope_degrees) > 35 and roughness > 25 and rainfall > 70 and vibration > 3:
-                risk_level = 2 # High
+        return df
 
-            df['rockfall_risk'] = risk_level
-
-            return df
-
-    except rasterio.RasterioIOError as e:
-        print(f"Error opening or reading the DEM file: {e}")
-        print("Please ensure the GeoTIFF file exists at the specified path and is valid.")
-        return pd.DataFrame()  # Return an empty DataFrame in case of error
-
-
-if __name__ == '__main__':
-    # Replace 'real_dem.tif' with the actual path to your downloaded GEE GeoTIFF file
-    dem_file = 'dummy_dem.tif'
-    features_df = extract_dem_features(dem_file)
-
-    if not features_df.empty:
-        print(features_df)
-    else:
-        print(f"No features extracted. Ensure '{dem_file}' is a valid GeoTIFF.")
+    except Exception as exc:
+        logger.exception("Failed to generate dummy DEM features for %s", location_str)
+        return pd.DataFrame()
