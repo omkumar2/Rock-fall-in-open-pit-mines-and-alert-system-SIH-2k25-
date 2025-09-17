@@ -1,0 +1,1 @@
+# Rock-fall-in-open-pit-mines-and-alert-system-SIH-2k25-
